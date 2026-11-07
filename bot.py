@@ -2,16 +2,23 @@ import telebot
 import yt_dlp
 import os
 import re
+from dotenv import load_dotenv
 
-BOT_TOKEN = "8404096353:AAGYRD3678ZmC2MobbwldR9JfvFYVdM23TI"
+load_dotenv()
 
-bot = telebot.TeleBot(BOT_TOKEN)
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env")
+
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+telebot.apihelper.CONNECT_TIMEOUT = 60
+telebot.apihelper.READ_TIMEOUT = 300
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def is_instagram_url(url):
-    pattern = r"(https?://)?(www\.)?instagram\.com/(p|reel|tv)/[\w-]+"
+    pattern = r"(https?://)?(www\.)?instagram\.com/(p|reel|tv|reels)/[\w-]+"
     return bool(re.search(pattern, url))
 
 def download_video(url):
@@ -19,21 +26,25 @@ def download_video(url):
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
         "format": "best[ext=mp4]/best",
         "quiet": True,
+        "noprogress": True,
     }
+    cookies_path = os.path.join(os.path.dirname(__file__), "instagram_cookies.txt")
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            if os.path.exists(filename):
-                return filename
-            base = os.path.splitext(filename)[0]
-            for ext in ["mp4", "mkv", "webm"]:
-                alt = f"{base}.{ext}"
-                if os.path.exists(alt):
-                    return alt
+            info = ydl.extract_info(url, download=False)
+            video_id = info.get("id", "")
+            filepath = ydl.prepare_filename(info)
+            ydl.download([url])
+            if os.path.exists(filepath):
+                return filepath
+    except yt_dlp.utils.DownloadError as e:
+        print(f"Download error: {e}")
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Unexpected error: {e}")
     return None
+
 
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
@@ -56,10 +67,20 @@ def handle_message(message):
         bot.edit_message_text("❌ Не удалось скачать. Аккаунт приватный?",
             chat_id=status.chat.id, message_id=status.message_id)
         return
-    with open(filepath, "rb") as f:
-        bot.send_video(message.chat.id, f, caption="✅ Готово!")
-    bot.delete_message(status.chat.id, status.message_id)
-    os.remove(filepath)
+    # Check file size (Telegram bot limit: 50 MB)
+    file_size = os.path.getsize(filepath)
+    if file_size > 50 * 1024 * 1024:
+        bot.edit_message_text("❌ Файл слишком большой (>50 МБ). Лимит Telegram.",
+            chat_id=status.chat.id, message_id=status.message_id)
+        os.remove(filepath)
+        return
+    try:
+        with open(filepath, "rb") as f:
+            bot.send_video(message.chat.id, f, caption="✅ Готово!")
+        bot.delete_message(status.chat.id, status.message_id)
+    finally:
+        if os.path.exists(filepath):
+            os.remove(filepath)
 
 print("🚀 InstaSniper запущен!")
 bot.infinity_polling()
